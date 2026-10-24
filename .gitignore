@@ -31,3 +31,5 @@
 # Security / Signing
 *.jks
 *.keystore
+# Code Audits
+/code_audits/
