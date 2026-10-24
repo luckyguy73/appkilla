@@ -1,0 +1,33 @@
+# OS / Environment
+.DS_Store
+*.iml
+
+# Gradle
+.gradle/
+/build/
+**/build/
+/local.properties
+
+# Android Studio IDE
+/.idea/caches/
+/.idea/libraries/
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+/.idea/shelf/
+
+# Native Build & Caches
+.externalNativeBuild/
+.cxx/
+/captures/
+
+# Build Outputs & Binaries
+*.apk
+*.aab
+*.dex
+*.class
+
+# Security / Signing
+*.jks
+*.keystore
