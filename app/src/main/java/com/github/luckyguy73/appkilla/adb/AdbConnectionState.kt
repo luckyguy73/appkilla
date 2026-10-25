@@ -1,22 +1,21 @@
 package com.github.luckyguy73.appkilla.adb
 
 /**
- * Represents the current status of the local ADB socket connection.
+ * Represents the current status of AppKilla's local process scan.
  */
 sealed interface AdbConnectionState {
 
     /** Socket disconnected */
     object Disconnected : AdbConnectionState
 
-    /** Attempting TCP socket handshake */
+    /** Reading the device process list */
     object Connecting : AdbConnectionState
 
-    /** ADB socket connected and authenticated successfully */
+    /** Process scan completed successfully */
     object Connected : AdbConnectionState
 
     /**
-     * Connected to ADB TCP port, but RSA key is not yet authorized by the device.
-     * User needs to accept the "Allow ADB debugging?" system dialog on screen.
+     * Retained for UI compatibility; this scan no longer uses ADB authorization.
      */
     object Unauthorized : AdbConnectionState
 

@@ -75,8 +75,8 @@ fun AppKillaScreen(
             // 1. Top System Status Header Card
             StatusHeaderCard(
                 activeAppsCount = uiState.activeBackgroundAppsCount,
+                processScanAvailable = uiState.isProcessScanAvailable,
                 selectedAppsCount = uiState.selectedAppsCount,
-                totalMemoryFreedMb = uiState.totalMemoryFreedMb,
                 isExecuting = uiState.isExecutingForceStop,
                 onForceCloseClick = { viewModel.forceCloseSelectedApps() }
             )
@@ -183,8 +183,8 @@ fun AppKillaScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = if (uiState.userMessage?.startsWith("ADB scan unavailable") == true) {
-                            "ADB scan unavailable; no apps could be confirmed."
+                        text = if (uiState.userMessage?.contains("process scan unavailable", ignoreCase = true) == true) {
+                            "Device scan unavailable; only Android-visible running apps can be confirmed."
                         } else {
                             "No active background apps found."
                         },

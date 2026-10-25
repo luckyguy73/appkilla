@@ -47,32 +47,32 @@ fun AdbStatusBanner(
         AdbConnectionState.Unauthorized -> Quadruple(
             Color(0x33F59E0B),
             WarningOrange,
-            "ADB AUTHORIZATION REQUIRED",
-            "Enable ADB debugging in Fire TV Settings. If an authorization prompt appears, choose 'Always allow', then reconnect."
+            "ACCESS REQUIRED",
+            "Allow AppKilla's ADB key in the Fire TV authorization dialog, then scan again."
         )
         AdbConnectionState.Connecting -> Quadruple(
             Color(0x3300E5FF),
             CyanGlow,
-            "CONNECTING TO DEVICE ADB...",
-            "Connecting to the Fire TV's local ADB service on port 5555..."
+            "SCANNING RUNNING APPS...",
+            "Checking the device process list directly from AppKilla."
         )
         is AdbConnectionState.Error -> Quadruple(
             Color(0x33EF4444),
             ErrorRed,
-            "ADB CONNECTION ERROR",
+            "PROCESS SCAN UNAVAILABLE",
             state.message
         )
         AdbConnectionState.Disconnected -> Quadruple(
             Color(0x3364748B),
             Color(0xFF64748B),
-            "ADB DISCONNECTED",
-            "Device ADB is unavailable. Check ADB debugging and the Fire TV network connection."
+            "PROCESS SCAN NOT RUN",
+            "Refresh the device process list to identify running apps."
         )
         AdbConnectionState.Connected -> Quadruple(
             Color(0x3310B981),
             SuccessGreen,
-            "ADB CONNECTED",
-            "Device ADB connection established."
+            "PROCESS SCAN READY",
+            "Only packages confirmed in the device process list are shown."
         )
     }
 
@@ -121,7 +121,7 @@ fun AdbStatusBanner(
                 )
             ) {
                 Text(
-                    text = "RECONNECT",
+                    text = if (state is AdbConnectionState.Unauthorized) "ENABLE ACCESS" else "SCAN AGAIN",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold
                 )

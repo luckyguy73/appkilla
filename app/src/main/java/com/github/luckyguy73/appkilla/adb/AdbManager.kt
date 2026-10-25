@@ -1,200 +1,136 @@
 package com.github.luckyguy73.appkilla.adb
 
 import android.content.Context
+import android.net.wifi.WifiManager
+import android.os.Build
 import android.util.Log
+import dadb.AdbConnectException
+import dadb.AdbKeyPair
+import dadb.Dadb
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.EOFException
+import java.net.InetAddress
 
-/**
- * Singleton manager that controls ADB socket lifecycle,
- * auto-reconnections, and force-stop command execution.
- */
+/** Uses DADB to authenticate to the device's own adbd and run shell commands. */
 class AdbManager(private val context: Context) {
 
     companion object {
-        private const val TAG = "AppKilla_AdbManager"
+        private const val TAG = "AppKilla_Dadb"
+        private const val ADB_PORT = 5555
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
-    private var client: AdbClient? = null
-
+    private val keyPair: AdbKeyPair by lazy { loadOrCreateKeyPair() }
     private val _connectionState = MutableStateFlow<AdbConnectionState>(AdbConnectionState.Disconnected)
-    val connectionState: StateFlow<AdbConnectionState> = _connectionState.asStateFlow()
+    val connectionState: StateFlow<AdbConnectionState> = _connectionState
 
     fun connect() {
-        Log.i(TAG, "AdbManager.connect() requested")
-        scope.launch {
-            mutex.withLock {
-                ensureConnectedInternal(forceNewHandshake = true)
-            }
-        }
+        scope.launch { getRunningProcessNames() }
     }
 
-    /**
-     * Returns process names from the target Android device. A null result means
-     * the scan could not be completed; an empty set is a successful scan with
-     * no matching application processes.
-     */
     suspend fun getRunningProcessNames(): Set<String>? = mutex.withLock {
-        val state = ensureConnectedInternal(forceNewHandshake = false)
-        if (state !is AdbConnectionState.Connected) {
-            Log.w(TAG, AdbErrorCode.message(AdbErrorCode.ADB_UNAVAILABLE, "Cannot scan running processes because ADB is not connected: $state"))
-            return@withLock null
+        _connectionState.value = AdbConnectionState.Connecting
+        withContext(Dispatchers.IO) {
+            var lastError: Exception? = null
+            for (host in deviceAddresses()) {
+                try {
+                    Log.i(TAG, "Connecting to device adbd at $host:$ADB_PORT")
+                    Dadb.create(host, ADB_PORT, keyPair, connectTimeout = 4_000, socketTimeout = 8_000).use { dadb ->
+                        val response = dadb.shell("ps -A")
+                        if (response.exitCode != 0) {
+                            throw IllegalStateException("ps -A exited ${response.exitCode}: ${response.allOutput}")
+                        }
+                        val processes = RunningProcessParser.parse(response.output)
+                            ?: throw IllegalStateException("ps -A returned an empty response")
+                        Log.i(TAG, "DADB process snapshot contains ${processes.size} app process names")
+                        _connectionState.value = AdbConnectionState.Connected
+                        return@withContext processes
+                    }
+                } catch (e: Exception) {
+                    lastError = e
+                    Log.e(TAG, "DADB connection/shell failed at $host:$ADB_PORT", e)
+                }
+            }
+            val error = lastError
+            val failureMessage = when {
+                Build.MANUFACTURER.equals("Amazon", ignoreCase = true) &&
+                    error is AdbConnectException && error.hasEofCause() ->
+                    "This Fire TV closes AppKilla's local ADB handshake before sending an RSA authorization challenge. This Fire OS build blocks in-device ADB, so AppKilla cannot verify running apps or force-stop them."
+                else -> "DADB could not read device processes${error?.let { ": ${it.localizedMessage ?: it.javaClass.simpleName}" } ?: ""}"
+            }
+            _connectionState.value = AdbConnectionState.Error(
+                failureMessage
+            )
+            null
         }
-
-        val activeClient = client ?: return@withLock null
-        val result = activeClient.executeShellCommand("ps -A")
-        val output = result.getOrNull()
-        if (output == null) {
-            Log.w(TAG, AdbErrorCode.message(AdbErrorCode.PROCESS_SCAN_FAILED, "ADB process scan failed: ${result.exceptionOrNull()?.javaClass?.simpleName} - ${result.exceptionOrNull()?.localizedMessage}"))
-            _connectionState.value = AdbConnectionState.Disconnected
-            client?.disconnect()
-            client = null
-            return@withLock null
-        }
-
-        val processNames = RunningProcessParser.parse(output)
-        if (processNames == null) {
-            Log.w(TAG, AdbErrorCode.message(AdbErrorCode.PROCESS_SCAN_EMPTY, "ADB process scan returned empty output"))
-        } else {
-            Log.i(TAG, "ADB process scan found ${processNames.size} package-style processes")
-        }
-        processNames
     }
 
     suspend fun forceStopApp(packageName: String): Boolean = mutex.withLock {
-        Log.i(TAG, "AdbManager.forceStopApp() called for package: '$packageName'")
-        val command = AdbCommandResult.forceStopCommand(packageName)
-        if (command == null) {
-            Log.w(TAG, "Rejected invalid package name for force-stop")
-            return false
-        }
-
-        var currentState = _connectionState.value
-        Log.d(TAG, "Current ADB connection state prior to forceStop: $currentState")
-
-        // If already connected with an active client, execute directly without re-opening socket!
-        if (currentState is AdbConnectionState.Connected && client != null) {
-            val activeClient = client!!
-            Log.d(TAG, "Reusing existing connected ADB socket for 'am force-stop $packageName'...")
-            val result = activeClient.executeShellCommand(command)
-            if (result.isSuccess) {
-                val exitCode = result.getOrNull()?.let(AdbCommandResult::parseExitCode)
-                if (exitCode == 0) {
-                    Log.i(TAG, "Force-stop shell command returned exit status 0 for package: '$packageName'")
-                    return true
+        val command = AdbCommandResult.forceStopCommand(packageName) ?: return@withLock false
+        withContext(Dispatchers.IO) {
+            for (host in deviceAddresses()) {
+                try {
+                    Dadb.create(host, ADB_PORT, keyPair, connectTimeout = 4_000, socketTimeout = 8_000).use { dadb ->
+                        val before = RunningProcessParser.parse(dadb.shell("ps -A").output) ?: return@use false
+                        if (packageName !in before && before.none { it.startsWith("$packageName:") }) return@use false
+                        val response = dadb.shell(command)
+                        val status = AdbCommandResult.parseExitCode(response.output)
+                        if (status != 0) return@use false
+                        val after = RunningProcessParser.parse(dadb.shell("ps -A").output) ?: return@use false
+                        val stillRunning = packageName in after || after.any { it.startsWith("$packageName:") }
+                        Log.i(TAG, "Force-stop $packageName exit=$status stillRunning=$stillRunning")
+                        _connectionState.value = AdbConnectionState.Connected
+                        return@withContext !stillRunning
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "DADB force-stop failed at $host:$ADB_PORT", e)
                 }
-                Log.w(TAG, "Force-stop command failed or returned no valid exit status for '$packageName' (exitCode=$exitCode)")
-                return false
-            } else {
-                Log.w(TAG, "ADB transport failed on existing client socket. Reconnecting...")
-                _connectionState.value = AdbConnectionState.Disconnected
-                client?.disconnect()
-                client = null
             }
-        }
-
-        // If not connected, attempt connection handshake
-        Log.d(TAG, "ADB socket not currently connected. Attempting connection handshake...")
-        currentState = ensureConnectedInternal(forceNewHandshake = false)
-        if (currentState !is AdbConnectionState.Connected) {
-            Log.w(TAG, "ADB connection attempt finished with state: $currentState. Cannot execute force stop for '$packageName'.")
-            return false
-        }
-
-        val activeClient = client
-        if (activeClient == null) {
-            Log.e(TAG, "Active client is null despite state being Connected. Force stop aborted for '$packageName'.")
-            return false
-        }
-
-        Log.d(TAG, "Sending 'am force-stop $packageName' command via newly connected ADB client...")
-        val result = activeClient.executeShellCommand(command)
-        val exitCode = result.getOrNull()?.let(AdbCommandResult::parseExitCode)
-
-        return if (exitCode == 0) {
-            Log.i(TAG, "Successfully executed force stop for package: '$packageName'")
-            true
-        } else {
-            Log.e(TAG, "Force-stop command failed or returned no valid exit status for '$packageName' (exitCode=$exitCode): ${result.exceptionOrNull()?.localizedMessage}")
-            _connectionState.value = AdbConnectionState.Disconnected
-            client?.disconnect()
-            client = null
             false
         }
     }
 
-    private suspend fun ensureConnectedInternal(forceNewHandshake: Boolean): AdbConnectionState {
-        val current = _connectionState.value
-        Log.d(TAG, "ensureConnectedInternal(forceNewHandshake=$forceNewHandshake) - current state: $current")
-
-        if (current is AdbConnectionState.Connected && client != null && !forceNewHandshake) {
-            Log.d(TAG, "Already connected and valid client exists. Skipping new handshake.")
-            return current
-        }
-
-        Log.i(TAG, "Initiating new AdbClient handshake...")
-        _connectionState.value = AdbConnectionState.Connecting
-        client?.disconnect()
-        
-        var newClient = AdbClient(context)
-        var state = newClient.connect()
-
-        // Some Fire OS versions accept in-device ADB only on loopback, while others
-        // accept it on the Wi-Fi address. Try the other endpoint after a transport error.
-        if (state is AdbConnectionState.Error && newClient.host != "127.0.0.1") {
-            val firstError = state.message
-            newClient.disconnect()
-            val loopbackClient = AdbClient(context, host = "127.0.0.1")
-            val loopbackState = loopbackClient.connect()
-            if (loopbackState is AdbConnectionState.Connected ||
-                loopbackState is AdbConnectionState.Unauthorized
-            ) {
-                newClient = loopbackClient
-                state = loopbackState
-            } else {
-                loopbackClient.disconnect()
-                state = AdbConnectionState.Error(
-                    AdbErrorCode.message(AdbErrorCode.BOTH_ENDPOINTS_FAILED, "ADB connection failed on both device network address and 127.0.0.1. ") +
-                        "Network endpoint: $firstError; loopback endpoint: ${if (loopbackState is AdbConnectionState.Error) loopbackState.message else loopbackState}"
-                )
-            }
-        }
-
-        if (state is AdbConnectionState.Connected) {
-            Log.i(TAG, "ADB connection established successfully.")
-            client = newClient
-            _connectionState.value = AdbConnectionState.Connected
-        } else {
-            // Unauthorized/error clients are not retained by the manager. In particular,
-            // the authorization wait may time out with a live socket; close it before a
-            // later reconnect creates another client.
-            newClient.disconnect()
-            Log.w(TAG, "ADB connection attempt ended with state: $state")
-            client = null
-            _connectionState.value = state
-        }
-
-        return state
+    private fun loadOrCreateKeyPair(): AdbKeyPair {
+        val dir = File(context.filesDir, "adb").apply { mkdirs() }
+        val privateKey = File(dir, "adbkey")
+        val publicKey = File(dir, "adbkey.pub")
+        if (!privateKey.exists()) AdbKeyPair.generate(privateKey, publicKey)
+        return AdbKeyPair.read(privateKey, publicKey)
     }
 
-    fun disconnect() {
-        Log.i(TAG, "AdbManager.disconnect() requested")
-        scope.launch {
-            mutex.withLock {
-                client?.disconnect()
-                client = null
-                _connectionState.value = AdbConnectionState.Disconnected
-                Log.i(TAG, "AdbManager disconnected.")
+    private fun Throwable.hasEofCause(): Boolean = generateSequence(this) { it.cause }.any { it is EOFException }
+
+
+    /** Try loopback first, then this device's active Wi-Fi address for vendor adbd routing. */
+    private fun deviceAddresses(): List<String> {
+        val addresses = linkedSetOf("127.0.0.1", "localhost")
+        try {
+            val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            @Suppress("DEPRECATION")
+            val ip = wifi?.connectionInfo?.ipAddress ?: 0
+            if (ip != 0) {
+                val bytes = byteArrayOf(ip.toByte(), (ip shr 8).toByte(), (ip shr 16).toByte(), (ip shr 24).toByte())
+                InetAddress.getByAddress(bytes).hostAddress?.let(addresses::add)
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not determine the TV Wi-Fi address", e)
         }
+        return addresses.toList()
+    }
+
+    fun requestShellAccess() = connect()
+
+    fun disconnect() {
+        _connectionState.value = AdbConnectionState.Disconnected
     }
 }

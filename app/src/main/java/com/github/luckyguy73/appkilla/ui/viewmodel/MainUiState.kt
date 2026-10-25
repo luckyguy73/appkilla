@@ -10,7 +10,8 @@ data class MainUiState(
     val apps: List<AppInfo> = emptyList(),
     val isLoading: Boolean = false,
     val isExecutingForceStop: Boolean = false,
-    val totalMemoryFreedMb: Long = 1400L,
+    val totalMemoryFreedMb: Long = 0L,
+    val isProcessScanAvailable: Boolean = false,
     val adbConnectionState: AdbConnectionState = AdbConnectionState.Disconnected,
     val userMessage: String? = null
 ) {

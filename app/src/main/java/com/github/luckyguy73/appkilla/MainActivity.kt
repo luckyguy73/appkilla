@@ -24,7 +24,6 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var adbManager: AdbManager
     private lateinit var appRepository: AppRepository
-
     private val viewModel: MainViewModel by viewModels {
         MainViewModel.Factory(
             application = application,
@@ -56,7 +55,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        Log.i(TAG, "MainActivity.onDestroy() - Disconnecting ADB socket and cleaning up resources...")
+        Log.i(TAG, "MainActivity.onDestroy() - Unbinding shell service and cleaning up resources...")
         adbManager.disconnect()
     }
 }

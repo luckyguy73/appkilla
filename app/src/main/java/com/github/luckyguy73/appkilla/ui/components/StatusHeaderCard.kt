@@ -45,7 +45,6 @@ import com.github.luckyguy73.appkilla.ui.theme.ElectricBlue
 import com.github.luckyguy73.appkilla.ui.theme.ElectricBlueDark
 import com.github.luckyguy73.appkilla.ui.theme.TextPrimary
 import com.github.luckyguy73.appkilla.ui.theme.TextSecondary
-import java.util.Locale
 
 private val LightningBoltIcon: ImageVector by lazy {
     ImageVector.Builder(
@@ -64,8 +63,8 @@ private val LightningBoltIcon: ImageVector by lazy {
 @Composable
 fun StatusHeaderCard(
     activeAppsCount: Int,
+    processScanAvailable: Boolean,
     selectedAppsCount: Int,
-    totalMemoryFreedMb: Long,
     isExecuting: Boolean,
     onForceCloseClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -96,7 +95,7 @@ fun StatusHeaderCard(
                 Spacer(modifier = Modifier.height(4.dp))
 
                 Text(
-                    text = "$activeAppsCount BACKGROUND APPS ACTIVE",
+                    text = if (processScanAvailable) "$activeAppsCount BACKGROUND APPS ACTIVE" else "RUNNING APP STATUS UNKNOWN",
                     fontSize = 24.sp,
                     fontWeight = FontWeight.ExtraBold,
                     color = TextPrimary
@@ -104,9 +103,8 @@ fun StatusHeaderCard(
 
                 Spacer(modifier = Modifier.height(4.dp))
 
-                val freedFormatted = formatMemoryMb(totalMemoryFreedMb)
                 Text(
-                    text = "$freedFormatted MEMORY FREED TODAY",
+                    text = "MEMORY RECLAIMED IS NOT MEASURED",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Medium,
                     color = TextSecondary
@@ -195,13 +193,5 @@ private fun ForceCloseButton(
                 )
             }
         }
-    }
-}
-
-private fun formatMemoryMb(mb: Long): String {
-    return if (mb >= 1024) {
-        String.format(Locale.US, "%.1f GB", mb / 1024.0)
-    } else {
-        "$mb MB"
     }
 }

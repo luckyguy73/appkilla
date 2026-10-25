@@ -37,7 +37,7 @@ class MainViewModel(
     private fun observeAdbConnection() {
         viewModelScope.launch {
             adbManager.connectionState.collect { state ->
-                Log.i(TAG, "ADB Connection state changed -> $state")
+                Log.i(TAG, "Shell access state changed -> $state")
                 _uiState.update { it.copy(adbConnectionState = state) }
             }
         }
@@ -53,7 +53,7 @@ class MainViewModel(
                 val scanUsedAdb = refreshRunningAppsInternal()
                 if (!scanUsedAdb) {
                     _uiState.update {
-                        it.copy(userMessage = "${com.github.luckyguy73.appkilla.adb.AdbErrorCode.PROCESS_SCAN_FAILED}: ADB scan unavailable. Showing only processes visible to Android.")
+                        it.copy(userMessage = "${com.github.luckyguy73.appkilla.adb.AdbErrorCode.PROCESS_SCAN_FAILED}: Shell process scan unavailable. Showing only processes Android confirms are running.")
                     }
                 }
                 Log.i(TAG, "loadApps() complete.")
@@ -70,7 +70,7 @@ class MainViewModel(
 
     /**
      * Waits for an actual device process snapshot, then replaces the grid with
-     * apps present in that snapshot. Returns false when ADB could not provide it.
+     * apps present in that snapshot. Returns false when the shell scan is unavailable.
      */
     private suspend fun refreshRunningAppsInternal(): Boolean {
         val deviceProcessNames = adbManager.getRunningProcessNames()
@@ -85,7 +85,8 @@ class MainViewModel(
 
             state.copy(
                 apps = updatedApps,
-                totalMemoryFreedMb = savedFreedMb
+                totalMemoryFreedMb = savedFreedMb,
+                isProcessScanAvailable = deviceProcessNames != null
             )
         }
         return deviceProcessNames != null
@@ -137,11 +138,11 @@ class MainViewModel(
 
                 val feedbackMsg = when {
                     !scanUsedAdb ->
-                        "${com.github.luckyguy73.appkilla.adb.AdbErrorCode.PROCESS_SCAN_FAILED}: Force-stop finished, but the ADB app scan is unavailable; the displayed list may be incomplete."
+                        "${com.github.luckyguy73.appkilla.adb.AdbErrorCode.PROCESS_SCAN_FAILED}: Force-stop finished, but the shell process scan is unavailable; only Android-visible running processes can be shown."
                     killResult.closedCount > 0 ->
                         "Force-stop command succeeded for ${killResult.closedCount} app(s). Memory reclaimed is not measured."
-                    !killResult.isAdbConnected ->
-                        "${com.github.luckyguy73.appkilla.adb.AdbErrorCode.ADB_UNAVAILABLE}: ADB connection required: unable to force stop apps (${killResult.adbState})."
+                    !killResult.isShellConnected ->
+                        "${com.github.luckyguy73.appkilla.adb.AdbErrorCode.ADB_UNAVAILABLE}: Shell access required: unable to force stop apps (${killResult.connectionState})."
                     else ->
                         "${com.github.luckyguy73.appkilla.adb.AdbErrorCode.FORCE_STOP_FAILED}: Unable to force stop selected apps (${selectedApps.size} attempted). Check device logs."
                 }
@@ -166,8 +167,8 @@ class MainViewModel(
     }
 
     fun reconnectAdb() {
-        Log.i(TAG, "reconnectAdb() requested by user.")
-        adbManager.connect()
+        Log.i(TAG, "Shell access requested by user.")
+        adbManager.requestShellAccess()
     }
 
     fun clearUserMessage() {

@@ -19,13 +19,13 @@ import kotlinx.coroutines.withContext
 data class KillResult(
     val closedCount: Int,
     val freedMb: Int,
-    val isAdbConnected: Boolean,
-    val adbState: AdbConnectionState
+    val isShellConnected: Boolean,
+    val connectionState: AdbConnectionState
 )
 
 /**
- * Service/Repository responsible for querying installed and running applications,
- * memory usage statistics, and executing force-stop commands.
+ * Repository for querying installed apps verified by a process snapshot, measuring
+ * visible process memory, and executing shell-privileged force-stop commands.
  */
 class AppRepository(
     private val context: Context,
@@ -40,7 +40,7 @@ class AppRepository(
     private val prefs = context.getSharedPreferences("appkilla_stats", Context.MODE_PRIVATE)
 
     fun getSavedMemoryFreedMb(): Long {
-        return prefs.getLong(KEY_FREED_MEMORY_MB, 1400L)
+        return prefs.getLong(KEY_FREED_MEMORY_MB, 0L)
     }
 
     private fun addFreedMemory(mb: Int) {
@@ -52,7 +52,7 @@ class AppRepository(
 
     /**
      * Queries installed user-facing applications and includes only packages present
-     * in the current process snapshot. A null ADB snapshot falls back to Android's
+     * in the current process snapshot. A null shell snapshot falls back to Android's
      * restricted local process visibility; an empty snapshot means no matching apps.
      */
     suspend fun getApps(deviceProcessNames: Set<String>?): List<AppInfo> = withContext(Dispatchers.IO) {
@@ -81,13 +81,14 @@ class AppRepository(
         Log.d(TAG, "Discovered ${allUserAppPackages.size} launcher/leanback app packages.")
 
         // Android 11+ restricts ActivityManager process visibility for other apps.
-        // Prefer the device-wide ADB process snapshot; use Android's visible process
-        // list only when the ADB scan itself was unavailable.
+        // Prefer the DADB shell process snapshot; otherwise use only
+        // processes Android itself exposes. Never infer running state from install state.
         val localProcesses = am.runningAppProcesses ?: emptyList()
+        Log.i(TAG, "ActivityManager exposed running processes: ${localProcesses.map { it.processName }}")
         val processNames = deviceProcessNames ?: localProcesses.map { it.processName }.toSet()
         val runningPids = localProcesses.associate { it.pid to it.processName }
         val runningPackageNames = processNames.map { it.substringBefore(":") }.toSet()
-        Log.d(TAG, "Process snapshot: ${processNames.size} names, ADB scan available=${deviceProcessNames != null}.")
+        Log.d(TAG, "Process snapshot: ${processNames.size} names, shell scan available=${deviceProcessNames != null}.")
 
         val installedApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
         val appList = mutableListOf<AppInfo>()
@@ -101,8 +102,6 @@ class AppRepository(
             val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
             val isUserFacing = allUserAppPackages.contains(pkgName)
 
-            // Only show installed apps with a process present in this scan. This
-            // prevents the grid from presenting every installed app as "running".
             val isRunning = runningPackageNames.contains(pkgName)
             if (isRunning && (!isSystem || isUserFacing)) {
                 val label = pm.getApplicationLabel(appInfo).toString()
@@ -155,17 +154,12 @@ class AppRepository(
         return mb
     }
 
-    /**
-     * Force-stops all selected apps via ADB shell `am force-stop`.
-     * Also attempts `ActivityManager.killBackgroundProcesses`.
-     * Logs detailed force-stop status per package and returns a [KillResult].
-     */
+    /** Force-stops selected packages through the shell service and returns the results. */
     suspend fun killSelectedApps(appsToClose: List<AppInfo>): KillResult = withContext(Dispatchers.IO) {
-        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        val adbState = adbManager.connectionState.value
-        val isAdbConnected = adbState is AdbConnectionState.Connected
+        val connectionState = adbManager.connectionState.value
+        val isShellConnected = connectionState is AdbConnectionState.Connected
 
-        Log.i(TAG, "killSelectedApps triggered for ${appsToClose.size} apps. ADB Connection State: $adbState")
+        Log.i(TAG, "killSelectedApps triggered for ${appsToClose.size} apps. Shell access state: $connectionState")
 
         var totalFreed = 0
         var closedCount = 0
@@ -173,35 +167,27 @@ class AppRepository(
         for (app in appsToClose) {
             Log.i(TAG, "Processing force stop for app: '${app.appName}' (${app.packageName}), reported RAM: ${app.memoryUsageMb} MB")
 
-            // 1. Try local ADB force-stop
             val adbSuccess = adbManager.forceStopApp(app.packageName)
             if (adbSuccess) {
-                Log.i(TAG, "[SUCCESS] Local ADB force-stop succeeded for package '${app.packageName}'")
+                Log.i(TAG, "[SUCCESS] Shell force-stop succeeded for package '${app.packageName}'")
                 closedCount++
                 totalFreed += app.memoryUsageMb
             } else {
-                Log.w(TAG, "[FAILED] Local ADB force-stop failed or ADB not connected for package '${app.packageName}' (ADB State: $adbState)")
+                Log.w(TAG, "[FAILED] Shell force-stop failed for package '${app.packageName}' (state: $connectionState)")
             }
 
-            // 2. Local fallback kill (background process trim)
-            try {
-                Log.d(TAG, "Invoking ActivityManager.killBackgroundProcesses for package '${app.packageName}'...")
-                am.killBackgroundProcesses(app.packageName)
-            } catch (e: Exception) {
-                Log.w(TAG, "Exception calling killBackgroundProcesses for '${app.packageName}'", e)
-            }
         }
 
         if (totalFreed > 0) {
             addFreedMemory(totalFreed)
         }
 
-        Log.i(TAG, "killSelectedApps completed: $closedCount/${appsToClose.size} apps closed, $totalFreed MB freed. ADB Connected: $isAdbConnected")
+        Log.i(TAG, "killSelectedApps completed: $closedCount/${appsToClose.size} force-stop commands succeeded, $totalFreed MB reported. Shell connected: $isShellConnected")
         KillResult(
             closedCount = closedCount,
             freedMb = totalFreed,
-            isAdbConnected = isAdbConnected,
-            adbState = adbState
+            isShellConnected = isShellConnected,
+            connectionState = connectionState
         )
     }
 }
