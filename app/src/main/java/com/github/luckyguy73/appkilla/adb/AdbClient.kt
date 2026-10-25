@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 class AdbClient(
     private val context: Context,
-    private val host: String = resolveLocalAdbHost(context),
+    val host: String = resolveLocalAdbHost(context),
     private val port: Int = 5555,
     private val timeoutMs: Int = 5000,
 ) {
