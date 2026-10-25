@@ -164,7 +164,7 @@ class AdbManager(private val context: Context) {
                 loopbackClient.disconnect()
                 state = AdbConnectionState.Error(
                     "ADB connection failed on both device network address and 127.0.0.1. " +
-                        "Network endpoint: $firstError; loopback endpoint: ${loopbackState.message}"
+                        "Network endpoint: $firstError; loopback endpoint: ${if (loopbackState is AdbConnectionState.Error) loopbackState.message else loopbackState}"
                 )
             }
         }
