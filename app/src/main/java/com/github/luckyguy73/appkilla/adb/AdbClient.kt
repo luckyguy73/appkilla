@@ -1,17 +1,13 @@
 package com.github.luckyguy73.appkilla.adb
 
 import android.content.Context
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.OutputStream
-import java.net.Inet4Address
 import java.net.InetSocketAddress
-import java.net.NetworkInterface
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -19,80 +15,18 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Coroutine-based ADB TCP client for the ADB daemon running on this device.
- * Connects through the active Wi-Fi/Ethernet IPv4 address when available, performs RSA handshake,
+ * Connects to the local ADB TCP endpoint, performs RSA handshake,
  * and executes shell commands such as `am force-stop <package>`.
  */
 class AdbClient(
     private val context: Context,
-    private val host: String = resolveLocalAdbHost(context),
+    private val host: String = "127.0.0.1",
     private val port: Int = 5555,
     private val timeoutMs: Int = 5000,
 ) {
 
     companion object {
         private const val TAG = "AppKilla_AdbClient"
-
-        /**
-         * Fire TV's adbd normally listens on the device network interface, not
-         * necessarily on loopback. Resolve the active Wi-Fi/Ethernet address so an
-         * in-device ADB client uses the same endpoint the Mac can reach.
-         */
-        private fun resolveLocalAdbHost(context: Context): String {
-            val connectivityManager =
-                context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-            try {
-                val activeNetwork = connectivityManager?.activeNetwork
-                val capabilities = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
-                val isLanNetwork =
-                    capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true ||
-                    capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true
-                if (isLanNetwork && activeNetwork != null) {
-                    val address = connectivityManager?.getLinkProperties(activeNetwork)?.linkAddresses
-                        ?.mapNotNull { it.address as? Inet4Address }
-                        ?.firstOrNull { !it.isLoopbackAddress && !it.isLinkLocalAddress }
-                        ?.hostAddress
-                    if (!address.isNullOrBlank()) {
-                        Log.i(TAG, "Using active device network address $address for the ADB connection.")
-                        return address
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Unable to resolve ADB host from active network: ${e.localizedMessage}")
-            }
-
-            // Fallback for devices whose active LinkProperties are unavailable.
-            try {
-                val interfaces = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
-                    .sortedBy {
-                        when {
-                            it.name.startsWith("wlan", ignoreCase = true) -> 0
-                            it.name.startsWith("eth", ignoreCase = true) -> 1
-                            it.name.startsWith("en", ignoreCase = true) -> 2
-                            else -> 3
-                        }
-                    }
-                for (networkInterface in interfaces) {
-                    try {
-                        if (!networkInterface.isUp || networkInterface.isLoopback) continue
-                        val address = networkInterface.inetAddresses.toList()
-                            .filterIsInstance<Inet4Address>()
-                            .firstOrNull { !it.isLoopbackAddress && !it.isLinkLocalAddress }
-                            ?.hostAddress
-                        if (!address.isNullOrBlank()) {
-                            Log.i(TAG, "Using interface ${networkInterface.name} address $address for the ADB connection.")
-                            return address
-                        }
-                    } catch (e: Exception) {
-                        Log.d(TAG, "Skipping unavailable network interface ${networkInterface.name}: ${e.localizedMessage}")
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Unable to enumerate network interfaces for ADB: ${e.localizedMessage}")
-            }
-
-            Log.w(TAG, "No non-loopback IPv4 address found; falling back to 127.0.0.1.")
-            return "127.0.0.1"
-        }
 
         const val A_CNXN = 0x4E584E43 // "CNXN"
         const val A_AUTH = 0x48545541 // "AUTH"
@@ -133,7 +67,7 @@ class AdbClient(
      * Connects to this device's ADB TCP daemon and completes authentication.
      */
     suspend fun connect(): AdbConnectionState = withContext(Dispatchers.IO) {
-        Log.i(TAG, "Initiating device ADB TCP socket connection to $host:$port (timeout = ${timeoutMs}ms)...")
+        Log.i(TAG, "Initiating local ADB TCP socket connection to $host:$port (timeout = ${timeoutMs}ms)...")
         try {
             connectionState = AdbConnectionState.Connecting
 
@@ -221,7 +155,7 @@ class AdbClient(
 
             connectionState
         } catch (e: Exception) {
-            val failureDetail = "Failed to connect to device ADB socket ($host:$port): ${e.javaClass.simpleName} - ${e.localizedMessage}"
+            val failureDetail = "Failed to connect to local ADB socket ($host:$port): ${e.javaClass.simpleName} - ${e.localizedMessage}"
             Log.e(TAG, failureDetail, e)
             disconnect()
             connectionState = AdbConnectionState.Error(failureDetail)
