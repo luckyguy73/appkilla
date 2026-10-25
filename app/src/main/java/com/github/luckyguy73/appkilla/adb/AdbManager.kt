@@ -46,7 +46,7 @@ class AdbManager(private val context: Context) {
     suspend fun getRunningProcessNames(): Set<String>? = mutex.withLock {
         val state = ensureConnectedInternal(forceNewHandshake = false)
         if (state !is AdbConnectionState.Connected) {
-            Log.w(TAG, "Cannot scan running processes because ADB is not connected: $state")
+            Log.w(TAG, AdbErrorCode.message(AdbErrorCode.ADB_UNAVAILABLE, "Cannot scan running processes because ADB is not connected: $state"))
             return@withLock null
         }
 
@@ -54,7 +54,7 @@ class AdbManager(private val context: Context) {
         val result = activeClient.executeShellCommand("ps -A")
         val output = result.getOrNull()
         if (output == null) {
-            Log.w(TAG, "ADB process scan failed: ${result.exceptionOrNull()?.localizedMessage}")
+            Log.w(TAG, AdbErrorCode.message(AdbErrorCode.PROCESS_SCAN_FAILED, "ADB process scan failed: ${result.exceptionOrNull()?.javaClass?.simpleName} - ${result.exceptionOrNull()?.localizedMessage}"))
             _connectionState.value = AdbConnectionState.Disconnected
             client?.disconnect()
             client = null
@@ -63,7 +63,7 @@ class AdbManager(private val context: Context) {
 
         val processNames = RunningProcessParser.parse(output)
         if (processNames == null) {
-            Log.w(TAG, "ADB process scan returned empty output")
+            Log.w(TAG, AdbErrorCode.message(AdbErrorCode.PROCESS_SCAN_EMPTY, "ADB process scan returned empty output"))
         } else {
             Log.i(TAG, "ADB process scan found ${processNames.size} package-style processes")
         }
@@ -163,7 +163,7 @@ class AdbManager(private val context: Context) {
             } else {
                 loopbackClient.disconnect()
                 state = AdbConnectionState.Error(
-                    "ADB connection failed on both device network address and 127.0.0.1. " +
+                    AdbErrorCode.message(AdbErrorCode.BOTH_ENDPOINTS_FAILED, "ADB connection failed on both device network address and 127.0.0.1. ") +
                         "Network endpoint: $firstError; loopback endpoint: ${if (loopbackState is AdbConnectionState.Error) loopbackState.message else loopbackState}"
                 )
             }
