@@ -153,6 +153,10 @@ class AdbManager(private val context: Context) {
             client = newClient
             _connectionState.value = AdbConnectionState.Connected
         } else {
+            // Unauthorized/error clients are not retained by the manager. In particular,
+            // the authorization wait may time out with a live socket; close it before a
+            // later reconnect creates another client.
+            newClient.disconnect()
             Log.w(TAG, "ADB connection attempt ended with state: $state")
             client = null
             _connectionState.value = state
