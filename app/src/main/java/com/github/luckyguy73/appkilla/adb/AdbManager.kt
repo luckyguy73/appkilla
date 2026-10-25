@@ -145,8 +145,29 @@ class AdbManager(private val context: Context) {
         _connectionState.value = AdbConnectionState.Connecting
         client?.disconnect()
         
-        val newClient = AdbClient(context)
-        val state = newClient.connect()
+        var newClient = AdbClient(context)
+        var state = newClient.connect()
+
+        // Some Fire OS versions accept in-device ADB only on loopback, while others
+        // accept it on the Wi-Fi address. Try the other endpoint after a transport error.
+        if (state is AdbConnectionState.Error && newClient.host != "127.0.0.1") {
+            val firstError = state.message
+            newClient.disconnect()
+            val loopbackClient = AdbClient(context, host = "127.0.0.1")
+            val loopbackState = loopbackClient.connect()
+            if (loopbackState is AdbConnectionState.Connected ||
+                loopbackState is AdbConnectionState.Unauthorized
+            ) {
+                newClient = loopbackClient
+                state = loopbackState
+            } else {
+                loopbackClient.disconnect()
+                state = AdbConnectionState.Error(
+                    "ADB connection failed on both device network address and 127.0.0.1. " +
+                        "Network endpoint: $firstError; loopback endpoint: ${loopbackState.message}"
+                )
+            }
+        }
 
         if (state is AdbConnectionState.Connected) {
             Log.i(TAG, "ADB connection established successfully.")
