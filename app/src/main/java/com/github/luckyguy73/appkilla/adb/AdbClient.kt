@@ -200,28 +200,34 @@ class AdbClient(
 
                 when (packet.command) {
                     A_OKAY -> {
+                        if (packet.arg1 != localId) {
+                            throw java.io.IOException("ADB OKAY packet targeted local ID ${packet.arg1}, expected $localId")
+                        }
+                        if (remoteId != 0 && remoteId != packet.arg0) {
+                            throw java.io.IOException("ADB remote stream ID changed unexpectedly")
+                        }
                         remoteId = packet.arg0
-                        Log.d(TAG, "Channel opened successfully. Remote ID = $remoteId for local ID = $localId")
                     }
                     A_WRTE -> {
-                        if (packet.data.isNotEmpty()) {
-                            val chunk = String(packet.data, Charsets.UTF_8)
-                            Log.d(TAG, "A_WRTE received (${packet.data.size} bytes): '$chunk'")
-                            outputBuilder.append(chunk)
-                        } else {
-                            Log.d(TAG, "A_WRTE received empty payload")
+                        if (packet.arg1 != localId || remoteId == 0 || packet.arg0 != remoteId) {
+                            throw java.io.IOException("ADB WRTE packet has invalid stream identifiers")
                         }
-                        // ACK write packet
+                        outputBuilder.append(String(packet.data, Charsets.UTF_8))
                         writePacket(outStream, A_OKAY, localId, remoteId, ByteArray(0))
                     }
                     A_CLSE -> {
-                        Log.d(TAG, "A_CLSE received from ADB daemon. Closing local stream ID $localId")
-                        writePacket(outStream, A_CLSE, localId, remoteId, ByteArray(0))
+                        if (packet.arg1 != localId) {
+                            throw java.io.IOException("ADB CLSE packet targeted unexpected local ID ${packet.arg1}")
+                        }
+                        if (remoteId != 0 && packet.arg0 != remoteId) {
+                            throw java.io.IOException("ADB CLSE packet has unexpected remote ID ${packet.arg0}")
+                        }
+                        writePacket(outStream, A_CLSE, localId, packet.arg0, ByteArray(0))
                         break
                     }
-                    else -> {
-                        Log.w(TAG, "Unexpected command while awaiting command response: ${commandName(packet.command)}")
-                    }
+                    else -> throw java.io.IOException(
+                        "Unexpected command while awaiting shell response: ${commandName(packet.command)}"
+                    )
                 }
             }
 
@@ -282,39 +288,19 @@ class AdbClient(
     }
 
     private fun readPacket(inStream: DataInputStream): AdbPacket {
-        val headerBytes = ByteArray(24)
+        val headerBytes = ByteArray(AdbPacketCodec.HEADER_SIZE)
         inStream.readFully(headerBytes)
+        val header = AdbPacketCodec.parseHeader(headerBytes)
 
-        val buffer = ByteBuffer.wrap(headerBytes).order(ByteOrder.LITTLE_ENDIAN)
-        val command = buffer.int
-        val arg0 = buffer.int
-        buffer.int // arg1
-        val dataLength = buffer.int
-        buffer.int // dataCrc
-        buffer.int // magic
+        val data = ByteArray(header.dataLength)
+        if (data.isNotEmpty()) inStream.readFully(data)
+        AdbPacketCodec.validatePayload(header, data)
 
-        val data = if (dataLength > 0) {
-            val dataBytes = ByteArray(dataLength)
-            inStream.readFully(dataBytes)
-            dataBytes
-        } else {
-            ByteArray(0)
-        }
-
-        return AdbPacket(command, arg0, data)
+        return AdbPacket(header.command, header.arg0, header.arg1, data)
     }
 
     private fun calculateCrc(data: ByteArray): Int {
-        var crc = 0
-        for (b in data) {
-            crc += (b.toInt() and 0xFF)
-        }
-        return crc
+        return AdbPacketCodec.checksum(data)
     }
 
-    private class AdbPacket(
-        val command: Int,
-        val arg0: Int,
-        val data: ByteArray
-    )
 }

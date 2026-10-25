@@ -40,7 +40,12 @@ class AdbManager(private val context: Context) {
 
     suspend fun forceStopApp(packageName: String): Boolean = mutex.withLock {
         Log.i(TAG, "AdbManager.forceStopApp() called for package: '$packageName'")
-        
+        val command = AdbCommandResult.forceStopCommand(packageName)
+        if (command == null) {
+            Log.w(TAG, "Rejected invalid package name for force-stop")
+            return false
+        }
+
         var currentState = _connectionState.value
         Log.d(TAG, "Current ADB connection state prior to forceStop: $currentState")
 
@@ -48,12 +53,17 @@ class AdbManager(private val context: Context) {
         if (currentState is AdbConnectionState.Connected && client != null) {
             val activeClient = client!!
             Log.d(TAG, "Reusing existing connected ADB socket for 'am force-stop $packageName'...")
-            val result = activeClient.executeShellCommand("am force-stop $packageName")
+            val result = activeClient.executeShellCommand(command)
             if (result.isSuccess) {
-                Log.i(TAG, "Successfully executed force stop for package: '$packageName'")
-                return true
+                val exitCode = result.getOrNull()?.let(AdbCommandResult::parseExitCode)
+                if (exitCode == 0) {
+                    Log.i(TAG, "Force-stop shell command returned exit status 0 for package: '$packageName'")
+                    return true
+                }
+                Log.w(TAG, "Force-stop command failed or returned no valid exit status for '$packageName' (exitCode=$exitCode)")
+                return false
             } else {
-                Log.w(TAG, "Command failed on existing client socket. Closing socket and attempting re-handshake...")
+                Log.w(TAG, "ADB transport failed on existing client socket. Reconnecting...")
                 _connectionState.value = AdbConnectionState.Disconnected
                 client?.disconnect()
                 client = null
@@ -75,13 +85,14 @@ class AdbManager(private val context: Context) {
         }
 
         Log.d(TAG, "Sending 'am force-stop $packageName' command via newly connected ADB client...")
-        val result = activeClient.executeShellCommand("am force-stop $packageName")
+        val result = activeClient.executeShellCommand(command)
+        val exitCode = result.getOrNull()?.let(AdbCommandResult::parseExitCode)
 
-        return if (result.isSuccess) {
+        return if (exitCode == 0) {
             Log.i(TAG, "Successfully executed force stop for package: '$packageName'")
             true
         } else {
-            Log.e(TAG, "Failed to execute force stop for '$packageName': ${result.exceptionOrNull()?.localizedMessage}")
+            Log.e(TAG, "Force-stop command failed or returned no valid exit status for '$packageName' (exitCode=$exitCode): ${result.exceptionOrNull()?.localizedMessage}")
             _connectionState.value = AdbConnectionState.Disconnected
             client?.disconnect()
             client = null
