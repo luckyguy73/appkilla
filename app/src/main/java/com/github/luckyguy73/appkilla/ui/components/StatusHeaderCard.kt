@@ -178,7 +178,7 @@ private fun ForceCloseButton(
                         letterSpacing = 0.8.sp
                     )
                     Text(
-                        text = if (selectedCount > 0) "($selectedCount SELECTED)" else "ALL SELECTED",
+                        text = "($selectedCount SELECTED)",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFFE0F2FE)

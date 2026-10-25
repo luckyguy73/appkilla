@@ -1,6 +1,7 @@
 package com.github.luckyguy73.appkilla.adb
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.DataInputStream
@@ -25,6 +26,8 @@ class AdbClient(
 ) {
 
     companion object {
+        private const val TAG = "AppKilla_AdbClient"
+
         const val A_CNXN = 0x4E584E43 // "CNXN"
         const val A_AUTH = 0x48545541 // "AUTH"
         const val A_OPEN = 0x4E45504F // "OPEN"
@@ -38,6 +41,18 @@ class AdbClient(
 
         const val MAX_PAYLOAD = 4096
         const val VERSION = 0x01000000
+
+        private fun commandName(cmd: Int): String {
+            return when (cmd) {
+                A_CNXN -> "CNXN (0x4E584E43)"
+                A_AUTH -> "AUTH (0x48545541)"
+                A_OPEN -> "OPEN (0x4E45504F)"
+                A_OKAY -> "OKAY (0x59414B4F)"
+                A_CLSE -> "CLSE (0x45534C43)"
+                A_WRTE -> "WRTE (0x45545257)"
+                else -> String.format("UNKNOWN (0x%08X)", cmd)
+            }
+        }
     }
 
     private var socket: Socket? = null
@@ -52,14 +67,18 @@ class AdbClient(
      * Connects to the local ADB TCP daemon and completes authentication.
      */
     suspend fun connect(): AdbConnectionState = withContext(Dispatchers.IO) {
+        Log.i(TAG, "Initiating local ADB TCP socket connection to $host:$port (timeout = ${timeoutMs}ms)...")
         try {
             connectionState = AdbConnectionState.Connecting
 
+            Log.d(TAG, "Retrieving/generating RSA key pair for ADB authentication...")
             val keyPair = AdbCrypto.getOrCreateKeyPair(context)
 
             val newSocket = Socket()
+            Log.d(TAG, "Connecting socket to InetSocketAddress($host, $port)...")
             newSocket.connect(InetSocketAddress(host, port), timeoutMs)
             newSocket.soTimeout = timeoutMs
+            Log.i(TAG, "Socket connected to $host:$port successfully.")
 
             val inStream = DataInputStream(newSocket.getInputStream())
             val outStream = DataOutputStream(newSocket.getOutputStream())
@@ -70,45 +89,76 @@ class AdbClient(
 
             // Step 1: Send CNXN packet
             val systemIdentity = "host::AppKilla\u0000".toByteArray(Charsets.UTF_8)
+            Log.d(TAG, "Sending CNXN packet (VERSION=0x${VERSION.toString(16)}, MAX_PAYLOAD=$MAX_PAYLOAD, Identity='host::AppKilla')")
             writePacket(outStream, A_CNXN, VERSION, MAX_PAYLOAD, systemIdentity)
 
             // Step 2: Read response
             var response = readPacket(inStream)
+            Log.d(TAG, "Received initial response: command=${commandName(response.command)}, arg0=${response.arg0}, dataLength=${response.data.size}")
 
             if (response.command == A_CNXN) {
+                Log.i(TAG, "ADB daemon accepted connection immediately with CNXN response.")
                 connectionState = AdbConnectionState.Connected
                 return@withContext connectionState
             }
 
             if ((response.command == A_AUTH) && (response.arg0 == AUTH_TYPE_TOKEN)) {
                 val token = response.data
+                Log.d(TAG, "Received A_AUTH token challenge from ADB daemon (${token.size} bytes). Attempting signature auth...")
 
                 // Try signature authentication
                 val signature = AdbCrypto.signToken(keyPair.private, token)
+                Log.d(TAG, "Sending signed AUTH token (AUTH_TYPE_SIGNATURE)...")
                 writePacket(outStream, A_AUTH, AUTH_TYPE_SIGNATURE, 0, signature)
 
                 response = readPacket(inStream)
+                Log.d(TAG, "Received response after signature AUTH: command=${commandName(response.command)}, arg0=${response.arg0}")
 
                 if (response.command == A_AUTH) {
-                    // Signature rejected -> Send public key for authorization dialog
+                    Log.w(TAG, "ADB daemon rejected RSA signature (key not yet authorized). Sending public key payload for system popup...")
                     val pubKeyPayload = AdbCrypto.getAdbPublicKeyPayload(keyPair.public)
                     writePacket(outStream, A_AUTH, AUTH_TYPE_RSAPUBLICKEY, 0, pubKeyPayload)
 
+                    // Mark state as Unauthorized while user reviews popup on screen
                     connectionState = AdbConnectionState.Unauthorized
+
+                    Log.i(TAG, "Public key sent. Awaiting user on-screen authorization on TV (60s timeout)...")
+                    // Extend socket read timeout to 60s so socket remains alive while user taps 'Allow' on TV screen
+                    newSocket.soTimeout = 60000
+
+                    try {
+                        val authResp = readPacket(inStream)
+                        Log.d(TAG, "Received response after public key payload: command=${commandName(authResp.command)}, arg0=${authResp.arg0}")
+                        if (authResp.command == A_CNXN) {
+                            Log.i(TAG, "ADB daemon accepted public key on TV screen! State = Connected.")
+                            newSocket.soTimeout = timeoutMs // Restore normal timeout
+                            connectionState = AdbConnectionState.Connected
+                            return@withContext connectionState
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "No CNXN response within 60s or error while waiting for user authorization: ${e.localizedMessage}")
+                    }
+
+                    newSocket.soTimeout = timeoutMs
                     return@withContext connectionState
                 }
             }
 
-            connectionState = if (response.command == A_CNXN) {
-                AdbConnectionState.Connected
+            if (response.command == A_CNXN) {
+                Log.i(TAG, "ADB authentication successful! State = Connected.")
+                connectionState = AdbConnectionState.Connected
             } else {
-                AdbConnectionState.Error("Unexpected response: ${response.command}")
+                val errMsg = "Unexpected ADB response command: ${commandName(response.command)}"
+                Log.e(TAG, errMsg)
+                connectionState = AdbConnectionState.Error(errMsg)
             }
 
             connectionState
         } catch (e: Exception) {
+            val failureDetail = "Failed to connect to local ADB socket ($host:$port): ${e.javaClass.simpleName} - ${e.localizedMessage}"
+            Log.e(TAG, failureDetail, e)
             disconnect()
-            connectionState = AdbConnectionState.Error(e.localizedMessage ?: "Failed to connect to ADB on 127.0.0.1:5555")
+            connectionState = AdbConnectionState.Error(failureDetail)
             connectionState
         }
     }
@@ -118,44 +168,68 @@ class AdbClient(
      * Returns true if successfully executed.
      */
     suspend fun executeShellCommand(command: String): Result<String> = withContext(Dispatchers.IO) {
+        Log.i(TAG, "Executing ADB shell command: '$command'")
         val outStream = outputStream
-            ?: return@withContext Result.failure(IllegalStateException("ADB client is not connected"))
+        if (outStream == null) {
+            val err = "Cannot execute shell command '$command': outputStream is null (not connected)"
+            Log.e(TAG, err)
+            return@withContext Result.failure(IllegalStateException(err))
+        }
         val inStream = inputStream
-            ?: return@withContext Result.failure(IllegalStateException("ADB client is not connected"))
+        if (inStream == null) {
+            val err = "Cannot execute shell command '$command': inputStream is null (not connected)"
+            Log.e(TAG, err)
+            return@withContext Result.failure(IllegalStateException(err))
+        }
 
         try {
             val localId = localIdCounter.getAndIncrement()
             val destination = "shell:$command\u0000".toByteArray(Charsets.UTF_8)
 
-            // Send A_OPEN packet
+            Log.d(TAG, "Sending A_OPEN packet for localId=$localId, destination='shell:$command'")
             writePacket(outStream, A_OPEN, localId, 0, destination)
 
             val outputBuilder = StringBuilder()
             var remoteId = 0
+            var packetsProcessed = 0
 
             while (true) {
                 val packet = readPacket(inStream)
+                packetsProcessed++
+                Log.d(TAG, "Shell packet #$packetsProcessed received: command=${commandName(packet.command)}, arg0=${packet.arg0}")
+
                 when (packet.command) {
                     A_OKAY -> {
                         remoteId = packet.arg0
+                        Log.d(TAG, "Channel opened successfully. Remote ID = $remoteId for local ID = $localId")
                     }
                     A_WRTE -> {
                         if (packet.data.isNotEmpty()) {
-                            outputBuilder.append(String(packet.data, Charsets.UTF_8))
+                            val chunk = String(packet.data, Charsets.UTF_8)
+                            Log.d(TAG, "A_WRTE received (${packet.data.size} bytes): '$chunk'")
+                            outputBuilder.append(chunk)
+                        } else {
+                            Log.d(TAG, "A_WRTE received empty payload")
                         }
                         // ACK write packet
                         writePacket(outStream, A_OKAY, localId, remoteId, ByteArray(0))
                     }
                     A_CLSE -> {
-                        // Channel closed by server
+                        Log.d(TAG, "A_CLSE received from ADB daemon. Closing local stream ID $localId")
                         writePacket(outStream, A_CLSE, localId, remoteId, ByteArray(0))
                         break
+                    }
+                    else -> {
+                        Log.w(TAG, "Unexpected command while awaiting command response: ${commandName(packet.command)}")
                     }
                 }
             }
 
-            Result.success(outputBuilder.toString())
+            val finalOutput = outputBuilder.toString()
+            Log.i(TAG, "ADB shell command '$command' completed. Output (${finalOutput.length} chars): '$finalOutput'")
+            Result.success(finalOutput)
         } catch (e: Exception) {
+            Log.e(TAG, "Exception during ADB shell command execution: '$command'", e)
             disconnect()
             Result.failure(e)
         }
@@ -165,15 +239,19 @@ class AdbClient(
      * Closes socket connection cleanly.
      */
     fun disconnect() {
+        Log.i(TAG, "Disconnecting ADB socket...")
         try {
             inputStream?.close()
             outputStream?.close()
             socket?.close()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.w(TAG, "Exception closing ADB socket resources", e)
+        }
         inputStream = null
         outputStream = null
         socket = null
         connectionState = AdbConnectionState.Disconnected
+        Log.i(TAG, "ADB socket disconnected.")
     }
 
     private fun writePacket(

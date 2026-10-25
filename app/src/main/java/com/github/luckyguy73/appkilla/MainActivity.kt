@@ -1,6 +1,7 @@
 package com.github.luckyguy73.appkilla
 
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
@@ -17,6 +18,10 @@ import com.github.luckyguy73.appkilla.ui.viewmodel.MainViewModel
 
 class MainActivity : ComponentActivity() {
 
+    companion object {
+        private const val TAG = "AppKilla_MainActivity"
+    }
+
     private lateinit var adbManager: AdbManager
     private lateinit var appRepository: AppRepository
 
@@ -31,6 +36,7 @@ class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalTvMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Log.i(TAG, "MainActivity.onCreate() - Initializing AppKilla TV Application...")
 
         // Initialize core dependencies
         adbManager = AdbManager(applicationContext)
@@ -50,6 +56,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        Log.i(TAG, "MainActivity.onDestroy() - Disconnecting ADB socket and cleaning up resources...")
         adbManager.disconnect()
     }
 }

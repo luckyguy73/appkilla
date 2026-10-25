@@ -10,7 +10,7 @@ data class AppInfo(
     val appName: String,
     val icon: Drawable?,
     val memoryUsageMb: Int,
-    val isSelected: Boolean = true,
+    val isSelected: Boolean = false,
     val isSystemApp: Boolean = false,
     val isRunning: Boolean = true
 )

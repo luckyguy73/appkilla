@@ -1,6 +1,7 @@
 package com.github.luckyguy73.appkilla.adb
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -17,6 +18,10 @@ import kotlinx.coroutines.sync.withLock
  */
 class AdbManager(private val context: Context) {
 
+    companion object {
+        private const val TAG = "AppKilla_AdbManager"
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
     private var client: AdbClient? = null
@@ -25,6 +30,7 @@ class AdbManager(private val context: Context) {
     val connectionState: StateFlow<AdbConnectionState> = _connectionState.asStateFlow()
 
     fun connect() {
+        Log.i(TAG, "AdbManager.connect() requested")
         scope.launch {
             mutex.withLock {
                 ensureConnectedInternal(forceNewHandshake = true)
@@ -33,24 +39,49 @@ class AdbManager(private val context: Context) {
     }
 
     suspend fun forceStopApp(packageName: String): Boolean = mutex.withLock {
-        // If state is Unauthorized or Error, don't trigger repeating public key authorization popups on button clicks!
-        if (_connectionState.value is AdbConnectionState.Unauthorized) {
-            return false
-        }
+        Log.i(TAG, "AdbManager.forceStopApp() called for package: '$packageName'")
+        
+        var currentState = _connectionState.value
+        Log.d(TAG, "Current ADB connection state prior to forceStop: $currentState")
 
-        if (_connectionState.value !is AdbConnectionState.Connected) {
-            val state = ensureConnectedInternal(forceNewHandshake = false)
-            if (state !is AdbConnectionState.Connected) {
-                return false
+        // If already connected with an active client, execute directly without re-opening socket!
+        if (currentState is AdbConnectionState.Connected && client != null) {
+            val activeClient = client!!
+            Log.d(TAG, "Reusing existing connected ADB socket for 'am force-stop $packageName'...")
+            val result = activeClient.executeShellCommand("am force-stop $packageName")
+            if (result.isSuccess) {
+                Log.i(TAG, "Successfully executed force stop for package: '$packageName'")
+                return true
+            } else {
+                Log.w(TAG, "Command failed on existing client socket. Closing socket and attempting re-handshake...")
+                _connectionState.value = AdbConnectionState.Disconnected
+                client?.disconnect()
+                client = null
             }
         }
 
-        val activeClient = client ?: return false
+        // If not connected, attempt connection handshake
+        Log.d(TAG, "ADB socket not currently connected. Attempting connection handshake...")
+        currentState = ensureConnectedInternal(forceNewHandshake = false)
+        if (currentState !is AdbConnectionState.Connected) {
+            Log.w(TAG, "ADB connection attempt finished with state: $currentState. Cannot execute force stop for '$packageName'.")
+            return false
+        }
+
+        val activeClient = client
+        if (activeClient == null) {
+            Log.e(TAG, "Active client is null despite state being Connected. Force stop aborted for '$packageName'.")
+            return false
+        }
+
+        Log.d(TAG, "Sending 'am force-stop $packageName' command via newly connected ADB client...")
         val result = activeClient.executeShellCommand("am force-stop $packageName")
 
         return if (result.isSuccess) {
+            Log.i(TAG, "Successfully executed force stop for package: '$packageName'")
             true
         } else {
+            Log.e(TAG, "Failed to execute force stop for '$packageName': ${result.exceptionOrNull()?.localizedMessage}")
             _connectionState.value = AdbConnectionState.Disconnected
             client?.disconnect()
             client = null
@@ -59,14 +90,15 @@ class AdbManager(private val context: Context) {
     }
 
     private suspend fun ensureConnectedInternal(forceNewHandshake: Boolean): AdbConnectionState {
-        if (_connectionState.value is AdbConnectionState.Connected && client != null && !forceNewHandshake) {
-            return _connectionState.value
+        val current = _connectionState.value
+        Log.d(TAG, "ensureConnectedInternal(forceNewHandshake=$forceNewHandshake) - current state: $current")
+
+        if (current is AdbConnectionState.Connected && client != null && !forceNewHandshake) {
+            Log.d(TAG, "Already connected and valid client exists. Skipping new handshake.")
+            return current
         }
 
-        if (!forceNewHandshake && _connectionState.value is AdbConnectionState.Unauthorized) {
-            return _connectionState.value
-        }
-
+        Log.i(TAG, "Initiating new AdbClient handshake...")
         _connectionState.value = AdbConnectionState.Connecting
         client?.disconnect()
         
@@ -74,9 +106,11 @@ class AdbManager(private val context: Context) {
         val state = newClient.connect()
 
         if (state is AdbConnectionState.Connected) {
+            Log.i(TAG, "ADB connection established successfully.")
             client = newClient
             _connectionState.value = AdbConnectionState.Connected
         } else {
+            Log.w(TAG, "ADB connection attempt ended with state: $state")
             client = null
             _connectionState.value = state
         }
@@ -85,11 +119,13 @@ class AdbManager(private val context: Context) {
     }
 
     fun disconnect() {
+        Log.i(TAG, "AdbManager.disconnect() requested")
         scope.launch {
             mutex.withLock {
                 client?.disconnect()
                 client = null
                 _connectionState.value = AdbConnectionState.Disconnected
+                Log.i(TAG, "AdbManager disconnected.")
             }
         }
     }

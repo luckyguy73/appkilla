@@ -2,6 +2,7 @@ package com.github.luckyguy73.appkilla.adb
 
 import android.content.Context
 import android.util.Base64
+import android.util.Log
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -24,6 +25,7 @@ import java.security.spec.X509EncodedKeySpec
  */
 object AdbCrypto {
 
+    private const val TAG = "AppKilla_AdbCrypto"
     private const val KEY_ALGORITHM = "RSA"
     private const val KEY_SIZE = 2048
     private const val PRIVATE_KEY_FILE = "adb_key.priv"
@@ -36,6 +38,7 @@ object AdbCrypto {
 
         return if (privFile.exists() && pubFile.exists()) {
             try {
+                Log.d(TAG, "Loading existing ADB RSA key pair from ${privFile.absolutePath}")
                 val privBytes = FileInputStream(privFile).use { it.readBytes() }
                 val pubBytes = FileInputStream(pubFile).use { it.readBytes() }
 
@@ -46,11 +49,14 @@ object AdbCrypto {
                 val privateKey = keyFactory.generatePrivate(privKeySpec)
                 val publicKey = keyFactory.generatePublic(pubKeySpec)
 
+                Log.d(TAG, "Successfully loaded existing ADB RSA key pair.")
                 KeyPair(publicKey, privateKey)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to load existing key pair, regenerating new RSA keys.", e)
                 generateAndSaveKeyPair(privFile, pubFile)
             }
         } else {
+            Log.d(TAG, "No existing ADB keys found. Generating new 2048-bit RSA key pair...")
             generateAndSaveKeyPair(privFile, pubFile)
         }
     }
@@ -66,6 +72,7 @@ object AdbCrypto {
         FileOutputStream(privFile).use { it.write(keyPair.private.encoded) }
         FileOutputStream(pubFile).use { it.write(keyPair.public.encoded) }
 
+        Log.i(TAG, "New RSA key pair generated and saved to ${privFile.name} and ${pubFile.name}")
         return keyPair
     }
 
@@ -74,10 +81,13 @@ object AdbCrypto {
      * ADB protocol requires SHA1withRSA signature over the token challenge.
      */
     fun signToken(privateKey: PrivateKey, token: ByteArray): ByteArray {
+        Log.d(TAG, "Signing ADB auth token (length=${token.size} bytes) with RSA private key")
         val signature = Signature.getInstance("SHA1withRSA")
         signature.initSign(privateKey)
         signature.update(token)
-        return signature.sign()
+        val sigBytes = signature.sign()
+        Log.d(TAG, "Token signed successfully (signature size=${sigBytes.size} bytes)")
+        return sigBytes
     }
 
     /**
@@ -85,6 +95,7 @@ object AdbCrypto {
      * + null-terminated user info string.
      */
     fun getAdbPublicKeyPayload(publicKey: PublicKey): ByteArray {
+        Log.d(TAG, "Formatting RSA public key into ADB public key structure payload")
         val rsaPublicKey = publicKey as RSAPublicKey
         val modulus = rsaPublicKey.modulus
         val exponent = rsaPublicKey.publicExponent
@@ -120,7 +131,9 @@ object AdbCrypto {
         val base64Key = Base64.encodeToString(binaryKey, Base64.NO_WRAP)
         val comment = " appkilla@localhost\u0000"
 
-        return (base64Key + comment).toByteArray(Charsets.UTF_8)
+        val payload = (base64Key + comment).toByteArray(Charsets.UTF_8)
+        Log.d(TAG, "ADB public key payload formatted (total payload length=${payload.size} bytes)")
+        return payload
     }
 
     private fun writeBigIntegerWords(buffer: ByteBuffer, value: BigInteger, numWords: Int) {
