@@ -38,6 +38,38 @@ class AdbManager(private val context: Context) {
         }
     }
 
+    /**
+     * Returns process names from the target Android device. A null result means
+     * the scan could not be completed; an empty set is a successful scan with
+     * no matching application processes.
+     */
+    suspend fun getRunningProcessNames(): Set<String>? = mutex.withLock {
+        val state = ensureConnectedInternal(forceNewHandshake = false)
+        if (state !is AdbConnectionState.Connected) {
+            Log.w(TAG, "Cannot scan running processes because ADB is not connected: $state")
+            return@withLock null
+        }
+
+        val activeClient = client ?: return@withLock null
+        val result = activeClient.executeShellCommand("ps -A")
+        val output = result.getOrNull()
+        if (output == null) {
+            Log.w(TAG, "ADB process scan failed: ${result.exceptionOrNull()?.localizedMessage}")
+            _connectionState.value = AdbConnectionState.Disconnected
+            client?.disconnect()
+            client = null
+            return@withLock null
+        }
+
+        val processNames = RunningProcessParser.parse(output)
+        if (processNames == null) {
+            Log.w(TAG, "ADB process scan returned empty output")
+        } else {
+            Log.i(TAG, "ADB process scan found ${processNames.size} package-style processes")
+        }
+        processNames
+    }
+
     suspend fun forceStopApp(packageName: String): Boolean = mutex.withLock {
         Log.i(TAG, "AdbManager.forceStopApp() called for package: '$packageName'")
         val command = AdbCommandResult.forceStopCommand(packageName)

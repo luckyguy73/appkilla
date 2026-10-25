@@ -44,29 +44,43 @@ class MainViewModel(
     }
 
     fun loadApps() {
-        Log.i(TAG, "loadApps() invoked. Initiating ADB connect and app scan...")
+        if (_uiState.value.isLoading || _uiState.value.isExecutingForceStop) return
+
+        Log.i(TAG, "loadApps() invoked. Starting a fresh running-process scan...")
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, userMessage = null) }
-            adbManager.connect()
-
-            refreshRunningAppsInternal()
-
-            _uiState.update { it.copy(isLoading = false) }
-            Log.i(TAG, "loadApps() complete. UI state updated.")
+            try {
+                val scanUsedAdb = refreshRunningAppsInternal()
+                if (!scanUsedAdb) {
+                    _uiState.update {
+                        it.copy(userMessage = "ADB scan unavailable. Showing only processes visible to Android.")
+                    }
+                }
+                Log.i(TAG, "loadApps() complete.")
+            } catch (e: Exception) {
+                Log.e(TAG, "App scan failed", e)
+                _uiState.update {
+                    it.copy(userMessage = "Unable to scan running apps: ${e.localizedMessage ?: "unknown error"}")
+                }
+            } finally {
+                _uiState.update { it.copy(isLoading = false) }
+            }
         }
     }
 
-    private suspend fun refreshRunningAppsInternal() {
-        val currentRunningApps = appRepository.getApps()
+    /**
+     * Waits for an actual device process snapshot, then replaces the grid with
+     * apps present in that snapshot. Returns false when ADB could not provide it.
+     */
+    private suspend fun refreshRunningAppsInternal(): Boolean {
+        val deviceProcessNames = adbManager.getRunningProcessNames()
+        val currentRunningApps = appRepository.getApps(deviceProcessNames)
         val savedFreedMb = appRepository.getSavedMemoryFreedMb()
 
         _uiState.update { state ->
             val existingSelections = state.apps.associate { it.packageName to it.isSelected }
-
             val updatedApps = currentRunningApps.map { app ->
-                // Default to unselected (false) for new apps
-                val isSelected = existingSelections[app.packageName] ?: false
-                app.copy(isSelected = isSelected)
+                app.copy(isSelected = existingSelections[app.packageName] ?: false)
             }
 
             state.copy(
@@ -74,6 +88,7 @@ class MainViewModel(
                 totalMemoryFreedMb = savedFreedMb
             )
         }
+        return deviceProcessNames != null
     }
 
     fun toggleAppSelection(packageName: String) {
@@ -95,53 +110,57 @@ class MainViewModel(
         _uiState.update { state ->
             val shouldSelectAll = state.apps.any { !it.isSelected }
             Log.i(TAG, "toggleSelectAll() called. Setting all apps selected = $shouldSelectAll")
-            val updatedList = state.apps.map { it.copy(isSelected = shouldSelectAll) }
-            state.copy(apps = updatedList)
+            state.copy(apps = state.apps.map { it.copy(isSelected = shouldSelectAll) })
         }
     }
 
     fun forceCloseSelectedApps() {
+        if (_uiState.value.isExecutingForceStop || _uiState.value.isLoading) return
+
         viewModelScope.launch {
             val selectedApps = _uiState.value.apps.filter { it.isSelected }
             Log.i(TAG, "forceCloseSelectedApps() requested. Selected count = ${selectedApps.size}")
-            
+
             if (selectedApps.isEmpty()) {
-                Log.w(TAG, "forceCloseSelectedApps() canceled: No apps selected by user.")
                 _uiState.update { it.copy(userMessage = "No apps selected! Please select apps to close.") }
                 return@launch
             }
 
             _uiState.update { it.copy(isExecutingForceStop = true, userMessage = null) }
+            try {
+                val killResult = appRepository.killSelectedApps(selectedApps)
 
-            val killResult = appRepository.killSelectedApps(selectedApps)
+                // Let the system settle, then take a new device-wide snapshot.
+                delay(500)
+                val scanUsedAdb = refreshRunningAppsInternal()
+                val updatedFreedMb = appRepository.getSavedMemoryFreedMb()
 
-            // Small delay for OS process cleanup
-            delay(500)
-
-            refreshRunningAppsInternal()
-
-            val updatedFreedMb = appRepository.getSavedMemoryFreedMb()
-
-            val feedbackMsg = when {
-                killResult.closedCount > 0 -> {
-                    "Force-closed ${killResult.closedCount} app(s). ${killResult.freedMb} MB memory freed!"
+                val feedbackMsg = when {
+                    !scanUsedAdb ->
+                        "Force-stop finished, but the ADB app scan is unavailable; the displayed list may be incomplete."
+                    killResult.closedCount > 0 ->
+                        "Force-stop command succeeded for ${killResult.closedCount} app(s). Memory reclaimed is not measured."
+                    !killResult.isAdbConnected ->
+                        "ADB connection required: unable to force stop apps (${killResult.adbState})."
+                    else ->
+                        "Unable to force stop selected apps (${selectedApps.size} attempted). Check device logs."
                 }
-                !killResult.isAdbConnected -> {
-                    "ADB Connection Required: Unable to force close apps. See ADB status banner above (${killResult.adbState})."
-                }
-                else -> {
-                    "Unable to force close selected apps (${selectedApps.size} attempted). Check device logs."
-                }
-            }
 
-            Log.i(TAG, "forceCloseSelectedApps() completed. Feedback message: '$feedbackMsg'")
-
-            _uiState.update {
-                it.copy(
-                    totalMemoryFreedMb = updatedFreedMb,
-                    isExecutingForceStop = false,
-                    userMessage = feedbackMsg
-                )
+                _uiState.update {
+                    it.copy(
+                        totalMemoryFreedMb = updatedFreedMb,
+                        isExecutingForceStop = false,
+                        userMessage = feedbackMsg
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Force-stop or follow-up scan failed", e)
+                _uiState.update {
+                    it.copy(
+                        isExecutingForceStop = false,
+                        userMessage = "Force-stop/refresh failed: ${e.localizedMessage ?: "unknown error"}"
+                    )
+                }
             }
         }
     }

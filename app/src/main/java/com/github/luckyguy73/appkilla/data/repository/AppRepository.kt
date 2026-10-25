@@ -12,7 +12,6 @@ import com.github.luckyguy73.appkilla.adb.AdbManager
 import com.github.luckyguy73.appkilla.data.model.AppInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlin.math.abs
 
 /**
  * Result data class for force stop execution containing detailed diagnostic metrics.
@@ -52,10 +51,11 @@ class AppRepository(
     }
 
     /**
-     * Service check: Queries installed user-facing and third-party applications
-     * (matching the design mockup), along with running status and RAM footprints.
+     * Queries installed user-facing applications and includes only packages present
+     * in the current process snapshot. A null ADB snapshot falls back to Android's
+     * restricted local process visibility; an empty snapshot means no matching apps.
      */
-    suspend fun getApps(): List<AppInfo> = withContext(Dispatchers.IO) {
+    suspend fun getApps(deviceProcessNames: Set<String>?): List<AppInfo> = withContext(Dispatchers.IO) {
         Log.i(TAG, "Scanning installed applications and processes...")
         val pm = context.packageManager
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -80,10 +80,14 @@ class AppRepository(
         val allUserAppPackages = (launcherApps + leanbackApps).filter { it != selfPackage }.toSet()
         Log.d(TAG, "Discovered ${allUserAppPackages.size} launcher/leanback app packages.")
 
-        val runningProcesses = am.runningAppProcesses ?: emptyList()
-        val runningPids = runningProcesses.associateBy({ it.pid }) { it.processName }
-        val runningPackageNames = runningProcesses.map { it.processName.substringBefore(":") }.toSet()
-        Log.d(TAG, "Currently running processes: ${runningProcesses.size} processes, ${runningPackageNames.size} distinct packages.")
+        // Android 11+ restricts ActivityManager process visibility for other apps.
+        // Prefer the device-wide ADB process snapshot; use Android's visible process
+        // list only when the ADB scan itself was unavailable.
+        val localProcesses = am.runningAppProcesses ?: emptyList()
+        val processNames = deviceProcessNames ?: localProcesses.map { it.processName }.toSet()
+        val runningPids = localProcesses.associate { it.pid to it.processName }
+        val runningPackageNames = processNames.map { it.substringBefore(":") }.toSet()
+        Log.d(TAG, "Process snapshot: ${processNames.size} names, ADB scan available=${deviceProcessNames != null}.")
 
         val installedApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
         val appList = mutableListOf<AppInfo>()
@@ -97,8 +101,10 @@ class AppRepository(
             val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
             val isUserFacing = allUserAppPackages.contains(pkgName)
 
-            // Include non-system user-facing apps or installed third-party apps (matching reference mockup)
-            if (!isSystem || isUserFacing) {
+            // Only show installed apps with a process present in this scan. This
+            // prevents the grid from presenting every installed app as "running".
+            val isRunning = runningPackageNames.contains(pkgName)
+            if (isRunning && (!isSystem || isUserFacing)) {
                 val label = pm.getApplicationLabel(appInfo).toString()
                 val icon = try {
                     pm.getApplicationIcon(appInfo)
@@ -106,11 +112,7 @@ class AppRepository(
                     null
                 }
 
-                val isRunning = runningPackageNames.contains(pkgName)
-                var memUsageMb = getProcessMemoryMb(am, runningPids, pkgName)
-                if (memUsageMb <= 0) {
-                    memUsageMb = getRandomEstimateForApp(pkgName)
-                }
+                val memUsageMb = getProcessMemoryMb(am, runningPids, pkgName)
 
                 appList.add(
                     AppInfo(
@@ -136,7 +138,9 @@ class AppRepository(
         runningPids: Map<Int, String>,
         packageName: String
     ): Int {
-        val pids = runningPids.filter { it.value == packageName }.keys.toIntArray()
+        val pids = runningPids.filter {
+            it.value == packageName || it.value.startsWith("$packageName:")
+        }.keys.toIntArray()
         if (pids.isEmpty()) return 0
 
         val memInfoArray = am.getProcessMemoryInfo(pids)
@@ -149,18 +153,6 @@ class AppRepository(
         val mb = totalPssKb / 1024
         Log.d(TAG, "Memory usage for package '$packageName' (PIDs ${pids.joinToString()}): $mb MB ($totalPssKb KB PSS)")
         return mb
-    }
-
-    private fun getRandomEstimateForApp(packageName: String): Int {
-        val hash = packageName.hashCode()
-        return when {
-            packageName.contains("kodi", ignoreCase = true) -> 120
-            packageName.contains("vpn", ignoreCase = true) -> 120
-            packageName.contains("iptv", ignoreCase = true) -> 160
-            packageName.contains("brenium", ignoreCase = true) -> 370
-            packageName.contains("amps", ignoreCase = true) -> 100
-            else -> 80 + (abs(hash) % 150)
-        }
     }
 
     /**
