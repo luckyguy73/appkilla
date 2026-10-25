@@ -21,10 +21,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Button
+import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Text
 import com.github.luckyguy73.appkilla.adb.AdbConnectionState
 import com.github.luckyguy73.appkilla.ui.theme.CyanGlow
+import com.github.luckyguy73.appkilla.ui.theme.DarkBackground
+import com.github.luckyguy73.appkilla.ui.theme.ElectricBlueDark
 import com.github.luckyguy73.appkilla.ui.theme.ErrorRed
 import com.github.luckyguy73.appkilla.ui.theme.SuccessGreen
 import com.github.luckyguy73.appkilla.ui.theme.TextPrimary
@@ -45,13 +48,13 @@ fun AdbStatusBanner(
             Color(0x33F59E0B),
             WarningOrange,
             "ADB AUTHORIZATION REQUIRED",
-            "Ensure ADB Debugging is enabled in Fire TV Settings, accept 'Always allow' on the system dialog, then click Reconnect."
+            "Enable ADB debugging in Fire TV Settings. If an authorization prompt appears, choose 'Always allow', then reconnect."
         )
         AdbConnectionState.Connecting -> Quadruple(
             Color(0x3300E5FF),
             CyanGlow,
-            "CONNECTING TO LOCAL ADB...",
-            "Establishing local socket connection on 127.0.0.1:5555..."
+            "CONNECTING TO DEVICE ADB...",
+            "Connecting to the Fire TV's local ADB service on port 5555..."
         )
         is AdbConnectionState.Error -> Quadruple(
             Color(0x33EF4444),
@@ -63,13 +66,13 @@ fun AdbStatusBanner(
             Color(0x3364748B),
             Color(0xFF64748B),
             "ADB DISCONNECTED",
-            "Local ADB socket is currently offline."
+            "Device ADB is unavailable. Check ADB debugging and the Fire TV network connection."
         )
         AdbConnectionState.Connected -> Quadruple(
             Color(0x3310B981),
             SuccessGreen,
             "ADB CONNECTED",
-            "Local socket connected."
+            "Device ADB connection established."
         )
     }
 
@@ -107,13 +110,20 @@ fun AdbStatusBanner(
 
             Button(
                 onClick = onReconnectClick,
-                shape = androidx.tv.material3.ButtonDefaults.shape(RoundedCornerShape(10.dp))
+                shape = ButtonDefaults.shape(RoundedCornerShape(10.dp)),
+                colors = ButtonDefaults.colors(
+                    containerColor = ElectricBlueDark,
+                    contentColor = TextPrimary,
+                    focusedContainerColor = CyanGlow,
+                    focusedContentColor = DarkBackground,
+                    pressedContainerColor = CyanGlow,
+                    pressedContentColor = DarkBackground
+                )
             ) {
                 Text(
                     text = "RECONNECT",
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary
+                    fontWeight = FontWeight.Bold
                 )
             }
         }

@@ -159,7 +159,7 @@ fun AppGridItemCard(
                     Spacer(modifier = Modifier.height(2.dp))
 
                     Text(
-                        text = "${app.memoryUsageMb}MB",
+                        text = if (app.memoryUsageMb > 0) "${app.memoryUsageMb}MB" else "— MB",
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = TextSecondary

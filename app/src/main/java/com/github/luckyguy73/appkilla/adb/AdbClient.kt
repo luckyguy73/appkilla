@@ -1,32 +1,90 @@
 package com.github.luckyguy73.appkilla.adb
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.OutputStream
+import java.net.Inet4Address
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * High performance, coroutine-based local ADB TCP client.
- * Connects to 127.0.0.1:5555, performs RSA handshake,
+ * Coroutine-based ADB TCP client for the ADB daemon running on this device.
+ * Tries the active Wi-Fi/Ethernet address and supports loopback fallback, performs RSA handshake,
  * and executes shell commands such as `am force-stop <package>`.
  */
 class AdbClient(
     private val context: Context,
-    private val host: String = "127.0.0.1",
+    val host: String = resolveLocalAdbHost(context),
     private val port: Int = 5555,
     private val timeoutMs: Int = 5000,
 ) {
 
     companion object {
         private const val TAG = "AppKilla_AdbClient"
+
+        /**
+         * Resolve the device's active LAN address. Fire OS versions can differ in
+         * whether the ADB TCP listener accepts loopback connections, so the manager
+         * also retries against 127.0.0.1 if this address fails.
+         */
+        private fun resolveLocalAdbHost(context: Context): String {
+            try {
+                val connectivityManager =
+                    context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                val activeNetwork = connectivityManager?.activeNetwork
+                val capabilities = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
+                val isLanNetwork =
+                    capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true ||
+                    capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true
+                if (isLanNetwork && activeNetwork != null) {
+                    val address = connectivityManager?.getLinkProperties(activeNetwork)?.linkAddresses
+                        ?.mapNotNull { it.address as? Inet4Address }
+                        ?.firstOrNull { !it.isLoopbackAddress && !it.isLinkLocalAddress }
+                        ?.hostAddress
+                    if (!address.isNullOrBlank()) return address
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Unable to resolve ADB host from active network: ${e.localizedMessage}")
+            }
+
+            try {
+                val interfaces = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+                    .sortedBy {
+                        when {
+                            it.name.startsWith("wlan", ignoreCase = true) -> 0
+                            it.name.startsWith("eth", ignoreCase = true) -> 1
+                            else -> 2
+                        }
+                    }
+                for (networkInterface in interfaces) {
+                    try {
+                        if (!networkInterface.isUp || networkInterface.isLoopback) continue
+                        val address = networkInterface.inetAddresses.toList()
+                            .filterIsInstance<Inet4Address>()
+                            .firstOrNull { !it.isLoopbackAddress && !it.isLinkLocalAddress }
+                            ?.hostAddress
+                        if (!address.isNullOrBlank()) return address
+                    } catch (e: Exception) {
+                        Log.d(TAG, "Skipping network interface ${networkInterface.name}: ${e.localizedMessage}")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Unable to enumerate network interfaces: ${e.localizedMessage}")
+            }
+
+            Log.w(TAG, "No non-loopback IPv4 address found; using 127.0.0.1.")
+            return "127.0.0.1"
+        }
 
         const val A_CNXN = 0x4E584E43 // "CNXN"
         const val A_AUTH = 0x48545541 // "AUTH"
@@ -64,7 +122,7 @@ class AdbClient(
         private set
 
     /**
-     * Connects to the local ADB TCP daemon and completes authentication.
+     * Connects to this device's ADB TCP daemon and completes authentication.
      */
     suspend fun connect(): AdbConnectionState = withContext(Dispatchers.IO) {
         Log.i(TAG, "Initiating local ADB TCP socket connection to $host:$port (timeout = ${timeoutMs}ms)...")
@@ -148,14 +206,14 @@ class AdbClient(
                 Log.i(TAG, "ADB authentication successful! State = Connected.")
                 connectionState = AdbConnectionState.Connected
             } else {
-                val errMsg = "Unexpected ADB response command: ${commandName(response.command)}"
+                val errMsg = AdbErrorCode.message(AdbErrorCode.UNEXPECTED_HANDSHAKE_RESPONSE, "Unexpected ADB response command: ${commandName(response.command)}")
                 Log.e(TAG, errMsg)
                 connectionState = AdbConnectionState.Error(errMsg)
             }
 
             connectionState
         } catch (e: Exception) {
-            val failureDetail = "Failed to connect to local ADB socket ($host:$port): ${e.javaClass.simpleName} - ${e.localizedMessage}"
+            val failureDetail = AdbErrorCode.message(AdbErrorCode.SOCKET_CONNECTION_FAILED, "Failed to connect to local ADB socket ($host:$port): ${e.javaClass.simpleName} - ${e.localizedMessage}")
             Log.e(TAG, failureDetail, e)
             disconnect()
             connectionState = AdbConnectionState.Error(failureDetail)
@@ -171,13 +229,13 @@ class AdbClient(
         Log.i(TAG, "Executing ADB shell command: '$command'")
         val outStream = outputStream
         if (outStream == null) {
-            val err = "Cannot execute shell command '$command': outputStream is null (not connected)"
+            val err = AdbErrorCode.message(AdbErrorCode.OUTPUT_STREAM_UNAVAILABLE, "Cannot execute shell command '$command': outputStream is null (not connected)")
             Log.e(TAG, err)
             return@withContext Result.failure(IllegalStateException(err))
         }
         val inStream = inputStream
         if (inStream == null) {
-            val err = "Cannot execute shell command '$command': inputStream is null (not connected)"
+            val err = AdbErrorCode.message(AdbErrorCode.INPUT_STREAM_UNAVAILABLE, "Cannot execute shell command '$command': inputStream is null (not connected)")
             Log.e(TAG, err)
             return@withContext Result.failure(IllegalStateException(err))
         }
@@ -235,7 +293,7 @@ class AdbClient(
             Log.i(TAG, "ADB shell command '$command' completed. Output (${finalOutput.length} chars): '$finalOutput'")
             Result.success(finalOutput)
         } catch (e: Exception) {
-            Log.e(TAG, "Exception during ADB shell command execution: '$command'", e)
+            Log.e(TAG, AdbErrorCode.message(AdbErrorCode.SHELL_TRANSPORT_FAILED, "Exception during ADB shell command execution: '$command': ${e.javaClass.simpleName} - ${e.localizedMessage}"), e)
             disconnect()
             Result.failure(e)
         }

@@ -38,6 +38,38 @@ class AdbManager(private val context: Context) {
         }
     }
 
+    /**
+     * Returns process names from the target Android device. A null result means
+     * the scan could not be completed; an empty set is a successful scan with
+     * no matching application processes.
+     */
+    suspend fun getRunningProcessNames(): Set<String>? = mutex.withLock {
+        val state = ensureConnectedInternal(forceNewHandshake = false)
+        if (state !is AdbConnectionState.Connected) {
+            Log.w(TAG, AdbErrorCode.message(AdbErrorCode.ADB_UNAVAILABLE, "Cannot scan running processes because ADB is not connected: $state"))
+            return@withLock null
+        }
+
+        val activeClient = client ?: return@withLock null
+        val result = activeClient.executeShellCommand("ps -A")
+        val output = result.getOrNull()
+        if (output == null) {
+            Log.w(TAG, AdbErrorCode.message(AdbErrorCode.PROCESS_SCAN_FAILED, "ADB process scan failed: ${result.exceptionOrNull()?.javaClass?.simpleName} - ${result.exceptionOrNull()?.localizedMessage}"))
+            _connectionState.value = AdbConnectionState.Disconnected
+            client?.disconnect()
+            client = null
+            return@withLock null
+        }
+
+        val processNames = RunningProcessParser.parse(output)
+        if (processNames == null) {
+            Log.w(TAG, AdbErrorCode.message(AdbErrorCode.PROCESS_SCAN_EMPTY, "ADB process scan returned empty output"))
+        } else {
+            Log.i(TAG, "ADB process scan found ${processNames.size} package-style processes")
+        }
+        processNames
+    }
+
     suspend fun forceStopApp(packageName: String): Boolean = mutex.withLock {
         Log.i(TAG, "AdbManager.forceStopApp() called for package: '$packageName'")
         val command = AdbCommandResult.forceStopCommand(packageName)
@@ -113,14 +145,39 @@ class AdbManager(private val context: Context) {
         _connectionState.value = AdbConnectionState.Connecting
         client?.disconnect()
         
-        val newClient = AdbClient(context)
-        val state = newClient.connect()
+        var newClient = AdbClient(context)
+        var state = newClient.connect()
+
+        // Some Fire OS versions accept in-device ADB only on loopback, while others
+        // accept it on the Wi-Fi address. Try the other endpoint after a transport error.
+        if (state is AdbConnectionState.Error && newClient.host != "127.0.0.1") {
+            val firstError = state.message
+            newClient.disconnect()
+            val loopbackClient = AdbClient(context, host = "127.0.0.1")
+            val loopbackState = loopbackClient.connect()
+            if (loopbackState is AdbConnectionState.Connected ||
+                loopbackState is AdbConnectionState.Unauthorized
+            ) {
+                newClient = loopbackClient
+                state = loopbackState
+            } else {
+                loopbackClient.disconnect()
+                state = AdbConnectionState.Error(
+                    AdbErrorCode.message(AdbErrorCode.BOTH_ENDPOINTS_FAILED, "ADB connection failed on both device network address and 127.0.0.1. ") +
+                        "Network endpoint: $firstError; loopback endpoint: ${if (loopbackState is AdbConnectionState.Error) loopbackState.message else loopbackState}"
+                )
+            }
+        }
 
         if (state is AdbConnectionState.Connected) {
             Log.i(TAG, "ADB connection established successfully.")
             client = newClient
             _connectionState.value = AdbConnectionState.Connected
         } else {
+            // Unauthorized/error clients are not retained by the manager. In particular,
+            // the authorization wait may time out with a live socket; close it before a
+            // later reconnect creates another client.
+            newClient.disconnect()
             Log.w(TAG, "ADB connection attempt ended with state: $state")
             client = null
             _connectionState.value = state

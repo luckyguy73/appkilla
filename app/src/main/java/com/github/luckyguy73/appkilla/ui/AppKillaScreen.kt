@@ -183,7 +183,11 @@ fun AppKillaScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "No active background apps found.",
+                        text = if (uiState.userMessage?.startsWith("ADB scan unavailable") == true) {
+                            "ADB scan unavailable; no apps could be confirmed."
+                        } else {
+                            "No active background apps found."
+                        },
                         fontSize = 18.sp,
                         color = TextSecondary
                     )
