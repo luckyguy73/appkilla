@@ -206,14 +206,14 @@ class AdbClient(
                 Log.i(TAG, "ADB authentication successful! State = Connected.")
                 connectionState = AdbConnectionState.Connected
             } else {
-                val errMsg = "Unexpected ADB response command: ${commandName(response.command)}"
+                val errMsg = AdbErrorCode.message(AdbErrorCode.UNEXPECTED_HANDSHAKE_RESPONSE, "Unexpected ADB response command: ${commandName(response.command)}")
                 Log.e(TAG, errMsg)
                 connectionState = AdbConnectionState.Error(errMsg)
             }
 
             connectionState
         } catch (e: Exception) {
-            val failureDetail = "Failed to connect to local ADB socket ($host:$port): ${e.javaClass.simpleName} - ${e.localizedMessage}"
+            val failureDetail = AdbErrorCode.message(AdbErrorCode.SOCKET_CONNECTION_FAILED, "Failed to connect to local ADB socket ($host:$port): ${e.javaClass.simpleName} - ${e.localizedMessage}")
             Log.e(TAG, failureDetail, e)
             disconnect()
             connectionState = AdbConnectionState.Error(failureDetail)
@@ -229,13 +229,13 @@ class AdbClient(
         Log.i(TAG, "Executing ADB shell command: '$command'")
         val outStream = outputStream
         if (outStream == null) {
-            val err = "Cannot execute shell command '$command': outputStream is null (not connected)"
+            val err = AdbErrorCode.message(AdbErrorCode.OUTPUT_STREAM_UNAVAILABLE, "Cannot execute shell command '$command': outputStream is null (not connected)")
             Log.e(TAG, err)
             return@withContext Result.failure(IllegalStateException(err))
         }
         val inStream = inputStream
         if (inStream == null) {
-            val err = "Cannot execute shell command '$command': inputStream is null (not connected)"
+            val err = AdbErrorCode.message(AdbErrorCode.INPUT_STREAM_UNAVAILABLE, "Cannot execute shell command '$command': inputStream is null (not connected)")
             Log.e(TAG, err)
             return@withContext Result.failure(IllegalStateException(err))
         }
@@ -293,7 +293,7 @@ class AdbClient(
             Log.i(TAG, "ADB shell command '$command' completed. Output (${finalOutput.length} chars): '$finalOutput'")
             Result.success(finalOutput)
         } catch (e: Exception) {
-            Log.e(TAG, "Exception during ADB shell command execution: '$command'", e)
+            Log.e(TAG, AdbErrorCode.message(AdbErrorCode.SHELL_TRANSPORT_FAILED, "Exception during ADB shell command execution: '$command': ${e.javaClass.simpleName} - ${e.localizedMessage}"), e)
             disconnect()
             Result.failure(e)
         }
