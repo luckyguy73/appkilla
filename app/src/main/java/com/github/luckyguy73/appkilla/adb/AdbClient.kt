@@ -1,13 +1,17 @@
 package com.github.luckyguy73.appkilla.adb
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.OutputStream
+import java.net.Inet4Address
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -15,18 +19,72 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Coroutine-based ADB TCP client for the ADB daemon running on this device.
- * Connects to the local ADB TCP endpoint, performs RSA handshake,
+ * Tries the active Wi-Fi/Ethernet address and supports loopback fallback, performs RSA handshake,
  * and executes shell commands such as `am force-stop <package>`.
  */
 class AdbClient(
     private val context: Context,
-    private val host: String = "127.0.0.1",
+    private val host: String = resolveLocalAdbHost(context),
     private val port: Int = 5555,
     private val timeoutMs: Int = 5000,
 ) {
 
     companion object {
         private const val TAG = "AppKilla_AdbClient"
+
+        /**
+         * Resolve the device's active LAN address. Fire OS versions can differ in
+         * whether the ADB TCP listener accepts loopback connections, so the manager
+         * also retries against 127.0.0.1 if this address fails.
+         */
+        private fun resolveLocalAdbHost(context: Context): String {
+            try {
+                val connectivityManager =
+                    context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                val activeNetwork = connectivityManager?.activeNetwork
+                val capabilities = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
+                val isLanNetwork =
+                    capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true ||
+                    capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true
+                if (isLanNetwork && activeNetwork != null) {
+                    val address = connectivityManager?.getLinkProperties(activeNetwork)?.linkAddresses
+                        ?.mapNotNull { it.address as? Inet4Address }
+                        ?.firstOrNull { !it.isLoopbackAddress && !it.isLinkLocalAddress }
+                        ?.hostAddress
+                    if (!address.isNullOrBlank()) return address
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Unable to resolve ADB host from active network: ${e.localizedMessage}")
+            }
+
+            try {
+                val interfaces = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+                    .sortedBy {
+                        when {
+                            it.name.startsWith("wlan", ignoreCase = true) -> 0
+                            it.name.startsWith("eth", ignoreCase = true) -> 1
+                            else -> 2
+                        }
+                    }
+                for (networkInterface in interfaces) {
+                    try {
+                        if (!networkInterface.isUp || networkInterface.isLoopback) continue
+                        val address = networkInterface.inetAddresses.toList()
+                            .filterIsInstance<Inet4Address>()
+                            .firstOrNull { !it.isLoopbackAddress && !it.isLinkLocalAddress }
+                            ?.hostAddress
+                        if (!address.isNullOrBlank()) return address
+                    } catch (e: Exception) {
+                        Log.d(TAG, "Skipping network interface ${networkInterface.name}: ${e.localizedMessage}")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Unable to enumerate network interfaces: ${e.localizedMessage}")
+            }
+
+            Log.w(TAG, "No non-loopback IPv4 address found; using 127.0.0.1.")
+            return "127.0.0.1"
+        }
 
         const val A_CNXN = 0x4E584E43 // "CNXN"
         const val A_AUTH = 0x48545541 // "AUTH"
