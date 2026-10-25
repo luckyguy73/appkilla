@@ -53,14 +53,14 @@ class MainViewModel(
                 val scanUsedAdb = refreshRunningAppsInternal()
                 if (!scanUsedAdb) {
                     _uiState.update {
-                        it.copy(userMessage = "ADB scan unavailable. Showing only processes visible to Android.")
+                        it.copy(userMessage = "${com.github.luckyguy73.appkilla.adb.AdbErrorCode.PROCESS_SCAN_FAILED}: ADB scan unavailable. Showing only processes visible to Android.")
                     }
                 }
                 Log.i(TAG, "loadApps() complete.")
             } catch (e: Exception) {
                 Log.e(TAG, "App scan failed", e)
                 _uiState.update {
-                    it.copy(userMessage = "Unable to scan running apps: ${e.localizedMessage ?: "unknown error"}")
+                    it.copy(userMessage = com.github.luckyguy73.appkilla.adb.AdbErrorCode.message(com.github.luckyguy73.appkilla.adb.AdbErrorCode.APP_SCAN_FAILED, "Unable to scan running apps: ${e.localizedMessage ?: "unknown error"}"))
                 }
             } finally {
                 _uiState.update { it.copy(isLoading = false) }
@@ -137,13 +137,13 @@ class MainViewModel(
 
                 val feedbackMsg = when {
                     !scanUsedAdb ->
-                        "Force-stop finished, but the ADB app scan is unavailable; the displayed list may be incomplete."
+                        "${com.github.luckyguy73.appkilla.adb.AdbErrorCode.PROCESS_SCAN_FAILED}: Force-stop finished, but the ADB app scan is unavailable; the displayed list may be incomplete."
                     killResult.closedCount > 0 ->
                         "Force-stop command succeeded for ${killResult.closedCount} app(s). Memory reclaimed is not measured."
                     !killResult.isAdbConnected ->
-                        "ADB connection required: unable to force stop apps (${killResult.adbState})."
+                        "${com.github.luckyguy73.appkilla.adb.AdbErrorCode.ADB_UNAVAILABLE}: ADB connection required: unable to force stop apps (${killResult.adbState})."
                     else ->
-                        "Unable to force stop selected apps (${selectedApps.size} attempted). Check device logs."
+                        "${com.github.luckyguy73.appkilla.adb.AdbErrorCode.FORCE_STOP_FAILED}: Unable to force stop selected apps (${selectedApps.size} attempted). Check device logs."
                 }
 
                 _uiState.update {
@@ -158,7 +158,7 @@ class MainViewModel(
                 _uiState.update {
                     it.copy(
                         isExecutingForceStop = false,
-                        userMessage = "Force-stop/refresh failed: ${e.localizedMessage ?: "unknown error"}"
+                        userMessage = com.github.luckyguy73.appkilla.adb.AdbErrorCode.message(com.github.luckyguy73.appkilla.adb.AdbErrorCode.FORCE_STOP_REFRESH_FAILED, "Force-stop/refresh failed: ${e.localizedMessage ?: "unknown error"}")
                     )
                 }
             }
