@@ -54,7 +54,7 @@ fun AdbStatusBanner(
             Color(0x3300E5FF),
             CyanGlow,
             "CONNECTING TO DEVICE ADB...",
-            "Connecting to the Fire TV's active network address on port 5555..."
+            "Connecting to the Fire TV's local ADB service on port 5555..."
         )
         is AdbConnectionState.Error -> Quadruple(
             Color(0x33EF4444),
